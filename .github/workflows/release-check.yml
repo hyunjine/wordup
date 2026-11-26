@@ -1,0 +1,61 @@
+name: Release Check
+
+# develop/vX.Y.Z → prod 승격 PR 을 머지 전에 검사한다 — 머지 뒤 Release (release.yml) 가 엉뚱한 버전 ·
+# 빈 노트로 나가지 않게. prod ruleset 의 required status check 다 (docs/release.md).
+#   1. head 가 develop/vX.Y.Z 인지
+#   2. 버전 이름 (scripts/version.sh get) 이 브랜치 이름의 X.Y.Z 와 같은지
+#      (버전은 scripts/create-dev-branch.sh 가 브랜치를 만들 때 맞춰 둔다 — 손으로 바꾼 경우를 잡는다)
+#   3. vX.Y.Z 태그가 아직 없는지 (이미 출시된 버전)
+#   4. CHANGELOG.md 에 '## [X.Y.Z]' 섹션이 있고 항목이 있는지 (scripts/release-notes.sh)
+on:
+  pull_request:
+    branches: [prod]
+    types: [opened, edited, reopened, synchronize]
+
+concurrency:
+  group: release-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # ruleset 의 required status check 가 이 이름을 본다. 바꾸면 ruleset 도 같이 바꾼다.
+    name: Release Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 브랜치 · 버전 · 태그 · 릴리즈 노트 확인
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_REF" =~ ^develop/v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+            { echo "::error::prod 로는 develop/vX.Y.Z 브랜치에서만 PR 할 수 있다 (지금: $HEAD_REF)"; exit 1; }
+          EXPECTED="${HEAD_REF#develop/v}"
+
+          ACTUAL=$(scripts/version.sh get)
+          [ "$ACTUAL" = "$EXPECTED" ] ||
+            { echo "::error::버전 이름($ACTUAL)이 브랜치 $HEAD_REF 와 다르다. scripts/version.sh set $EXPECTED 로 맞춘다."; exit 1; }
+
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$EXPECTED" > /dev/null 2>&1; then
+            echo "::error::v$EXPECTED 태그가 이미 있다 — 이미 출시된 버전이다. 버전을 올린 develop 브랜치로 PR 한다."; exit 1
+          fi
+
+          if ! scripts/release-notes.sh "$EXPECTED" > notes.md 2> err.txt; then
+            echo "::error::$(cat err.txt) — docs/release.md 「릴리즈 노트」 참고"; exit 1
+          fi
+
+          {
+            echo "### v$EXPECTED 출시 준비 OK"
+            echo
+            echo "빌드 번호는 머지 뒤 prod 커밋 수로 정해진다 (지금 prod + 1)."
+            echo
+            echo "#### 사용자 노트 미리보기"
+            cat notes.md
+          } >> "$GITHUB_STEP_SUMMARY"

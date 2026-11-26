@@ -1,0 +1,4 @@
+// 버전 이름은 scripts/create-dev-branch.sh 가 바꾼다 — 손으로 고치지 않는다 (docs/release.md).
+MARKETING_VERSION = 1.0.0
+// 로컬 빌드 번호는 고정. 출시 빌드 번호는 scripts/version.sh build-number 로 넘긴다.
+CURRENT_PROJECT_VERSION = 1

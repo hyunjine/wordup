@@ -1,0 +1,79 @@
+name: Release
+
+# prod 에 push 되면 (develop/vX.Y.Z → prod 승격 PR 머지) 태그 vX.Y.Z 와 GitHub Release 를 만든다.
+#   - 버전 이름: scripts/version.sh get
+#   - 빌드 번호: scripts/version.sh build-number — prod 의 first-parent 커밋 수 (출시마다 + 1)
+#   - 본문: 사용자 노트 (CHANGELOG.md 의 '## [X.Y.Z]' 섹션) + 개발자 노트 (직전 릴리즈 이후 머지된 PR, .github/release.yml 라벨 분류)
+#
+# 스토어 · TestFlight 업로드는 하지 않는다. CI 는 브랜치에 커밋하지 않는다.
+# vX.Y.Z 태그가 이미 있으면 건너뛴다 — 실패했을 때 Re-run 해도 안전하다.
+on:
+  push:
+    branches: [prod]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # 빌드 번호를 커밋 수로 세고 기존 태그를 보려면 전체 히스토리가 필요하다.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 태그 · 릴리즈 생성
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER=$(scripts/version.sh get)
+          TAG="v$VER"
+          if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+            echo "::notice::$TAG 태그가 이미 있어 건너뛴다"
+            echo "$TAG 는 이미 있다 — 건너뜀" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          BUILD=$(scripts/version.sh build-number HEAD)
+
+          # 사용자 노트 — Release Check 와 같은 규칙. 없으면 실패 (승격 PR 검사를 건너뛰고 머지한 경우).
+          scripts/release-notes.sh "$VER" > user.md
+
+          # 개발자 노트 — GitHub 자동 생성. 승격 PR 자신 (이 커밋을 만든 PR) 은 뺀다.
+          PREV=$(gh release list --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName // empty')
+          ARGS=(-f tag_name="$TAG" -f target_commitish="$GITHUB_SHA")
+          if [ -n "$PREV" ]; then ARGS+=(-f previous_tag_name="$PREV"); fi
+          PROMO=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].number // empty' 2> /dev/null || true)
+          gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${ARGS[@]}" --jq .body \
+            | sed -e '/^<!--.*-->$/d' -e "/^## What's Changed/d" \
+            | { if [ -n "$PROMO" ]; then grep -vE "/pull/${PROMO}\$" || true; else cat; fi; } > dev.md
+
+          {
+            echo "> 버전 \`$VER\` · 빌드 \`$BUILD\`"
+            echo
+            cat user.md
+            echo
+            echo "## 개발자 노트"
+            echo
+            cat dev.md
+          } > notes.md
+
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG ($BUILD)" --notes-file notes.md --latest
+
+          {
+            echo "### $TAG ($BUILD) 릴리즈 생성"
+            echo
+            echo "- 버전 이름: $VER"
+            echo "- 빌드 번호: $BUILD"
+            echo "- 이전 릴리즈: ${PREV:-없음}"
+            echo "- $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
